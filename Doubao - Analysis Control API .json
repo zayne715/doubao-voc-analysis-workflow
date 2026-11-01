@@ -1,0 +1,401 @@
+{
+  "name": "Doubao - Analysis Control API",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "start-analysis-speed-test",
+        "responseMode": "responseNode",
+        "options": {
+          "allowedOrigins": "http://localhost:5500,http://127.0.0.1:5500"
+        }
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        -880,
+        1264
+      ],
+      "id": "02829db4-7859-46fc-8c30-bc1bd2d8ac68",
+      "name": "Webhook - Start Analysis",
+      "webhookId": "94c4a081-5bbc-4d36-930a-1ed13e18cebb"
+    },
+    {
+      "parameters": {
+        "jsCode": "\nconst input = $input.first().json;\nconst body = input.body ?? input;\n\nconst source = String(body.source ?? '应用宝').trim();\nconst rawLimit = body.limit;\nconst limit = Number(rawLimit);\n\nlet error = '';\n\nif (source !== '应用宝') {\n  error = '当前仅支持应用宝评论数据源';\n}\n\nif (\n  rawLimit === undefined ||\n  rawLimit === null ||\n  String(rawLimit).trim() === '' ||\n  !Number.isInteger(limit) ||\n  limit < 10 ||\n  limit > 1000\n) {\n  error = '评论数量必须是 10～1000 之间的整数';\n}\n\nif (error) {\n  return [{\n    json: {\n      success: false,\n      status: 'invalid_request',\n      message: error\n    }\n  }];\n}\n\n// 为本次分析生成唯一批次编号\nconst now = new Date();\n\nconst datePart = now\n  .toISOString()\n  .replace(/[-:T.Z]/g, '')\n  .slice(0, 14);\n\nconst analysisRunId =\n  `run_${datePart}_${$execution.id}`;\n\nreturn [{\n  json: {\n    success: true,\n    status: 'request_received',\n    source,\n    limit,\n    analysis_run_id: analysisRunId,\n    message: '请求已通过校验，将尝试启动分析；此响应不代表分析已完成'\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -672,
+        1280
+      ],
+      "id": "77fa47e1-1842-4246-ad8f-f7fae6f55285",
+      "name": "Code - Validate Analysis Request"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $(\"Code - Validate Analysis Request\").first().json }}",
+        "options": {
+          "responseCode": 200,
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Content-Type",
+                "value": "application/json; charset=utf-8"
+              }
+            ]
+          }
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        -64,
+        1536
+      ],
+      "id": "e696facd-3b92-4b6e-aae1-26e390ded2ec",
+      "name": "Respond - Start Analysis"
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "HFagstyxhaNF4GBM",
+          "mode": "id",
+          "cachedResultUrl": "/workflow/HFagstyxhaNF4GBM"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "limit": "={{ $node[\"Code - Validate Analysis Request\"].json.limit }}",
+            "source": "={{ $node[\"Code - Validate Analysis Request\"].json.source }}",
+            "analysis_run_id": "={{ $node[\"Code - Validate Analysis Request\"].json.analysis_run_id }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "limit",
+              "displayName": "limit",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "number",
+              "removed": false
+            },
+            {
+              "id": "source",
+              "displayName": "source",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string",
+              "removed": false
+            },
+            {
+              "id": "analysis_run_id",
+              "displayName": "analysis_run_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string",
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": true
+        },
+        "options": {
+          "waitForSubWorkflow": false
+        }
+      },
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.3,
+      "position": [
+        160,
+        1536
+      ],
+      "id": "3fd1c9e3-fe22-4e06-840b-cc69e0534650",
+      "name": "Execute - Dynamic Analysis"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "413f456a-203d-4497-9144-9ad2f94e2660",
+              "leftValue": "={{ $json.success }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        -512,
+        1424
+      ],
+      "id": "feacb1a2-8f4f-4a93-a26b-4d704a3d35d4",
+      "name": "IF - Request Valid"
+    },
+    {
+      "parameters": {
+        "operation": "upsert",
+        "dataTableId": {
+          "__rl": true,
+          "value": "pHlbB7Ee4WnmyUqx",
+          "mode": "list",
+          "cachedResultName": "analysis_run_status",
+          "cachedResultUrl": "/projects/iGCl7eUPLnSOVSKN/datatables/pHlbB7Ee4WnmyUqx"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "analysis_run_id",
+              "keyValue": "={{ $(\"Code - Validate Analysis Request\").first().json.analysis_run_id }}"
+            }
+          ]
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "analysis_run_id": "={{ $(\"Code - Validate Analysis Request\").first().json.analysis_run_id }}",
+            "analysis_status": "running",
+            "analysis_stage": "starting",
+            "status_message": "请求已受理，正在启动分析",
+            "total_review_count": 0,
+            "valid_review_count": 0,
+            "updated_at": "={{ $now.toISO() }}",
+            "execution_id": "={{ $execution.id }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "analysis_run_id",
+              "displayName": "analysis_run_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "analysis_status",
+              "displayName": "analysis_status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "analysis_stage",
+              "displayName": "analysis_stage",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "status_message",
+              "displayName": "status_message",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "updated_at",
+              "displayName": "updated_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "total_review_count",
+              "displayName": "total_review_count",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "valid_review_count",
+              "displayName": "valid_review_count",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "execution_id",
+              "displayName": "execution_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        -288,
+        1536
+      ],
+      "id": "32e6be5d-73c2-45c1-8e89-a03572c37824",
+      "name": "Data Table - Upsert Request Status"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $(\"Code - Validate Analysis Request\").first().json }}",
+        "options": {
+          "responseCode": 400,
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Content-Type",
+                "value": "application/json; charset=utf-8"
+              }
+            ]
+          }
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        -288,
+        1216
+      ],
+      "id": "11f9c9ac-431f-4b1d-aef7-aeaf28fe9d65",
+      "name": "Respond - Invalid Analysis Request"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Webhook - Start Analysis": {
+      "main": [
+        [
+          {
+            "node": "Code - Validate Analysis Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code - Validate Analysis Request": {
+      "main": [
+        [
+          {
+            "node": "IF - Request Valid",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF - Request Valid": {
+      "main": [
+        [
+          {
+            "node": "Data Table - Upsert Request Status",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond - Invalid Analysis Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Data Table - Upsert Request Status": {
+      "main": [
+        [
+          {
+            "node": "Execute - Dynamic Analysis",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Respond - Start Analysis": {
+      "main": [
+        [
+          {
+            "node": "Execute - Dynamic Analysis",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Execute - Dynamic Analysis": {
+      "main": [
+        [
+          {
+            "node": "Respond - Start Analysis",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "52da3f04-8a3d-484e-9635-4b18d96b0868",
+  "meta": {
+    "instanceId": "6d13b23637810c2caaac47c54e50325f90498d1eef65dbda39fdc123b64e9717"
+  },
+  "nodeGroups": [],
+  "id": "TiQtFBf2MK2Fkcr7",
+  "tags": []
+}

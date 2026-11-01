@@ -1,0 +1,757 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
+    <title>Product Insight</title>
+
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+
+  <body>
+    <div class="app-shell">
+      <!-- ======================================================
+       Sidebar
+  ======================================================= -->
+
+      <aside class="sidebar">
+        <div class="sidebar-brand">
+          <div class="brand-mark">PI</div>
+
+          <div class="brand-copy">
+            <strong> Product Insight </strong>
+
+            <span> 用户反馈分析系统 </span>
+          </div>
+        </div>
+
+        <button
+          id="sidebarToggle"
+          class="sidebar-toggle"
+          type="button"
+          title="收起侧栏"
+          aria-label="收起侧栏"
+        >
+          ‹
+        </button>
+        <nav class="sidebar-nav">
+          <button class="nav-item active" data-page="dashboard">
+            <span class="nav-icon"> ◫ </span>
+
+            <span> Dashboard </span>
+          </button>
+
+          <button class="nav-item" data-page="problem">
+            <span class="nav-icon"> ! </span>
+
+            <span> Problem Review </span>
+          </button>
+
+          <button class="nav-item" data-page="positive">
+            <span class="nav-icon"> + </span>
+
+            <span> Positive Insights </span>
+          </button>
+        </nav>
+
+        <div class="sidebar-footer">
+          <span> Doubao Feedback </span>
+        </div>
+      </aside>
+
+      <!-- ======================================================
+       Workspace
+  ======================================================= -->
+
+      <div class="workspace">
+        <!-- ====================================================
+         Top Bar
+    ===================================================== -->
+
+        <header class="topbar">
+          <div>
+            <h1 id="pageTitle">Product Insight Dashboard</h1>
+
+            <p id="pageSubtitle">当前批次用户反馈的整体产品洞察</p>
+          </div>
+
+          <div class="topbar-actions">
+            <div class="batch-picker">
+              <label for="batchSelect">分析批次</label>
+              <select id="batchSelect" class="batch-select" aria-label="选择分析批次"></select>
+              <span id="batchCount" class="batch-count" aria-live="polite">加载中…</span>
+            </div>
+
+            <div id="reviewerWrap" class="reviewer-wrap" hidden>
+              <span class="reviewer-label"> Reviewer </span>
+
+              <input
+                id="reviewerInput"
+                class="reviewer-input"
+                type="text"
+                placeholder="输入审核人姓名"
+              />
+            </div>
+
+            <button id="refreshBtn" class="icon-button" title="刷新数据">
+              ↻
+            </button>
+
+            <button id="themeBtn" class="icon-button" title="切换主题">
+              ◐
+            </button>
+          </div>
+        </header>
+
+        <form id="batchAddForm" class="batch-add-form" hidden>
+          <label for="batchIdInput">添加已入库的分析批次</label>
+          <input
+            id="batchIdInput"
+            type="text"
+            placeholder="例如 run_20261011072726_463"
+            autocomplete="off"
+            spellcheck="false"
+            required
+          />
+          <button id="batchAddBtn" type="submit" class="button batch-primary">确认添加</button>
+          <button id="batchCancelBtn" type="button" class="button secondary">取消</button>
+          <span id="batchAddHint" class="batch-add-hint">请输入在 n8n 生成、且已入库的 analysis_run_id</span>
+        </form>
+
+        <!-- 新增：启动动态评论分析（保留原历史批次及审核模块） -->
+        <section class="analysis-launch" aria-labelledby="analysisLaunchTitle">
+          <div class="analysis-launch-heading">
+            <div>
+              <span class="eyebrow">New Analysis</span>
+              <h2 id="analysisLaunchTitle">发起用户反馈分析</h2>
+            </div>
+            <p>输入评论数量后启动 n8n 分析；结果写入后自动切换到新批次。</p>
+          </div>
+          <form id="analysisForm" class="analysis-launch-form">
+            <label for="analysisSource">评论来源</label>
+            <select id="analysisSource" class="analysis-launch-control" aria-label="评论来源">
+              <option value="应用宝" selected>应用宝</option>
+            </select>
+            <label for="analysisLimit">评论数量</label>
+            <input id="analysisLimit" class="analysis-launch-control analysis-limit"
+              type="number" min="10" max="1000" step="1" value="10" required />
+            <button id="startAnalysisBtn" class="button batch-primary" type="submit">开始分析</button>
+            <button id="analysisStopWaitBtn" class="button secondary" type="button" hidden>停止等待</button>
+          </form>
+          <p id="analysisStatus" class="analysis-status" data-tone="muted" role="status" aria-live="polite">
+            支持 10～1000 条；仅点击「开始分析」才会向后台提交任务。
+          </p>
+        </section>
+
+        <main class="main">
+          <!-- ==================================================
+           Dashboard
+      =================================================== -->
+
+          <section id="dashboardPage" class="page">
+            <section id="dashboardKpis" class="dashboard-kpis"></section>
+
+            <section class="dashboard-grid review-dashboard-grid">
+              <article class="panel">
+                <div class="panel-heading">
+                  <div>
+                    <span class="eyebrow"> Human Review </span>
+
+                    <h2>Problem 审核进度</h2>
+                  </div>
+
+                  <strong id="dashboardReviewPercent" class="large-percent">
+                    0%
+                  </strong>
+                </div>
+
+                <div class="dashboard-progress-track">
+                  <div
+                    id="dashboardReviewBar"
+                    class="dashboard-progress-bar"
+                  ></div>
+                </div>
+
+                <div id="dashboardReviewStats" class="review-status-grid"></div>
+              </article>
+
+              <article class="panel">
+                <div class="panel-heading">
+                  <div>
+                    <span class="eyebrow"> Positive Signal </span>
+
+                    <h2>Positive Highlights</h2>
+                  </div>
+
+                  <button id="goPositiveBtn" class="text-button">
+                    查看完整报告 →
+                  </button>
+                </div>
+
+                <div
+                  id="dashboardPositiveHighlights"
+                  class="dashboard-positive-highlights"
+                ></div>
+              </article>
+            </section>
+
+            <section class="panel dashboard-top-problems">
+              <div class="panel-heading">
+                <div>
+                  <span class="eyebrow"> Decision Focus </span>
+
+                  <h2>Top Priority Problems</h2>
+
+                  <p>按 Priority Rank 展示当前最值得关注的问题</p>
+                </div>
+
+                <button id="goProblemBtn" class="text-button">
+                  进入 Problem Review →
+                </button>
+              </div>
+
+              <div class="dashboard-table-scroll">
+                <table class="dashboard-table">
+                  <thead>
+                    <tr>
+                      <th>Rank</th>
+
+                      <th>Problem</th>
+
+                      <th>Feedback</th>
+
+                      <th>Priority</th>
+
+                      <th>Review</th>
+
+                      <th>Final Insight</th>
+
+                      <th>操作</th>
+                    </tr>
+                  </thead>
+
+                  <tbody id="dashboardTopProblems"></tbody>
+                </table>
+              </div>
+            </section>
+
+            <section class="dashboard-grid distribution-grid">
+              <article class="panel">
+                <div class="panel-heading">
+                  <div>
+                    <span class="eyebrow"> Distribution </span>
+
+                    <h2>Problem Category</h2>
+                  </div>
+                </div>
+
+                <div id="categoryDistribution" class="bar-list"></div>
+              </article>
+
+              <article class="panel">
+                <div class="panel-heading">
+                  <div>
+                    <span class="eyebrow"> Distribution </span>
+
+                    <h2>Problem Feature</h2>
+                  </div>
+                </div>
+
+                <div id="featureDistribution" class="bar-list"></div>
+              </article>
+            </section>
+
+            <div class="metric-note">
+              Category / Feature 分布按 Cluster 的
+              <code>feedback_count</code>
+              汇总。若一个 Cluster 同时包含多个标签，会分别计入对应标签。
+            </div>
+          </section>
+
+          <!-- ==================================================
+           Problem Review
+      =================================================== -->
+
+          <section id="problemPage" class="page" hidden>
+            <section id="problemStatsGrid" class="stats-grid"></section>
+
+            <section class="progress-panel">
+              <div class="progress-info">
+                <div>
+                  <span class="progress-title"> Review Progress </span>
+
+                  <span id="problemProgressText" class="progress-text">
+                    0 / 0
+                  </span>
+                </div>
+
+                <span id="problemProgressPercent" class="progress-percent">
+                  0%
+                </span>
+              </div>
+
+              <div class="progress-track">
+                <div id="problemProgressBar" class="progress-bar"></div>
+              </div>
+            </section>
+
+            <section class="toolbar">
+              <div class="toolbar-heading">
+                <div>
+                  <strong> Problem Clusters </strong>
+
+                  <span id="problemResultCount"> 0 条 </span>
+                </div>
+              </div>
+
+              <div class="filters problem-filters">
+                <div class="search-wrap">
+                  <span class="search-icon"> ⌕ </span>
+
+                  <input
+                    id="problemSearch"
+                    class="control search-input"
+                    type="text"
+                    placeholder="搜索 Cluster 名称或 ID..."
+                  />
+                </div>
+
+                <select id="problemStatusFilter" class="control">
+                  <option value="">全部状态</option>
+
+                  <option value="pending">待审核</option>
+
+                  <option value="approved">已通过</option>
+
+                  <option value="modified">已修改</option>
+
+                  <option value="rejected">已驳回</option>
+                </select>
+
+                <select id="problemPriorityFilter" class="control">
+                  <option value="">全部 Priority</option>
+
+                  <option value="high">High</option>
+
+                  <option value="medium">Medium</option>
+
+                  <option value="low">Low</option>
+                </select>
+
+                <select id="problemCategoryFilter" class="control">
+                  <option value="">全部 Category</option>
+                </select>
+
+                <select id="problemFeatureFilter" class="control">
+                  <option value="">全部 Feature</option>
+                </select>
+              </div>
+            </section>
+
+            <section class="table-card">
+              <div class="table-scroll">
+                <table>
+                  <thead>
+                    <tr>
+                      <th class="rank-column">Rank</th>
+
+                      <th>Issue Cluster</th>
+
+                      <th>Category</th>
+
+                      <th>Feature</th>
+
+                      <th>Feedback</th>
+
+                      <th>Priority</th>
+
+                      <th>Review</th>
+
+                      <th>操作</th>
+                    </tr>
+                  </thead>
+
+                  <tbody id="problemTableBody"></tbody>
+                </table>
+
+                <div id="problemEmpty" class="state-view" hidden>
+                  <strong> 没有符合条件的 Problem </strong>
+
+                  <p>可以调整筛选条件后再试。</p>
+                </div>
+              </div>
+            </section>
+          </section>
+
+          <!-- ==================================================
+           Positive Insights
+      =================================================== -->
+
+          <section id="positivePage" class="page" hidden>
+            <section class="positive-overview">
+              <div class="positive-report-header">
+                <div>
+                  <span class="eyebrow positive-eyebrow">
+                    AI Positive Overall Report
+                  </span>
+
+                  <h2>产品正向反馈总结</h2>
+
+                  <p>基于当前批次 Positive Product Insights 的整体归纳</p>
+                </div>
+
+                <div id="positiveReportMeta" class="positive-report-meta"></div>
+              </div>
+
+              <div id="positiveReportLoading" class="positive-report-state">
+                <div class="spinner"></div>
+
+                <span> 正在加载 Positive Overall Report... </span>
+              </div>
+
+              <div
+                id="positiveReportError"
+                class="positive-report-state"
+                hidden
+              >
+                <strong> Positive Report 加载失败 </strong>
+
+                <p id="positiveReportErrorText"></p>
+              </div>
+
+              <div
+                id="positiveReportEmpty"
+                class="positive-report-state"
+                hidden
+              >
+                <strong> 暂无 Positive Overall Report </strong>
+              </div>
+
+              <div
+                id="positiveReportContent"
+                class="positive-report-content"
+                hidden
+              >
+                <section class="report-section">
+                  <div class="report-section-title">
+                    <span> Overall Summary </span>
+
+                    <h3>整体结论</h3>
+                  </div>
+
+                  <div
+                    id="positiveOverallSummary"
+                    class="overall-summary-box"
+                  ></div>
+                </section>
+
+                <section class="report-section">
+                  <div class="report-section-title">
+                    <span> Core Strengths </span>
+
+                    <h3>核心产品优势</h3>
+                  </div>
+
+                  <div id="coreStrengths" class="strength-grid"></div>
+                </section>
+
+                <section class="report-section">
+                  <div class="report-section-title">
+                    <span> Cross-cluster Patterns </span>
+
+                    <h3>跨 Cluster 正向模式</h3>
+                  </div>
+
+                  <div id="crossClusterPatterns" class="pattern-list"></div>
+                </section>
+
+                <section class="report-section">
+                  <div class="report-section-title">
+                    <span> Product Implication </span>
+
+                    <h3>对产品团队的启示</h3>
+                  </div>
+
+                  <div
+                    id="positiveProductImplication"
+                    class="report-text-card"
+                  ></div>
+                </section>
+
+                <section class="report-section">
+                  <div class="report-section-title">
+                    <span> Representative Signals </span>
+
+                    <h3>代表性正向反馈</h3>
+                  </div>
+
+                  <div id="representativeSignals" class="signal-list"></div>
+                </section>
+
+                <section class="report-section">
+                  <div class="report-section-title">
+                    <span> Analysis Boundary </span>
+
+                    <h3>分析边界</h3>
+                  </div>
+
+                  <div id="positiveLimitations" class="limitations-box"></div>
+                </section>
+              </div>
+            </section>
+
+            <section class="toolbar">
+              <div class="toolbar-heading">
+                <div>
+                  <strong> Positive Clusters </strong>
+
+                  <span id="positiveResultCount"> 0 条 </span>
+                </div>
+              </div>
+
+              <div class="filters positive-filters">
+                <div class="search-wrap">
+                  <span class="search-icon"> ⌕ </span>
+
+                  <input
+                    id="positiveSearch"
+                    class="control search-input"
+                    type="text"
+                    placeholder="搜索 Positive Cluster..."
+                  />
+                </div>
+
+                <select id="positiveCategoryFilter" class="control">
+                  <option value="">全部 Category</option>
+                </select>
+
+                <select id="positiveFeatureFilter" class="control">
+                  <option value="">全部 Feature</option>
+                </select>
+              </div>
+            </section>
+
+            <section class="table-card">
+              <div class="table-scroll positive-table-scroll">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Positive Cluster</th>
+
+                      <th>Category</th>
+
+                      <th>Feature</th>
+
+                      <th>Feedback</th>
+
+                      <th>操作</th>
+                    </tr>
+                  </thead>
+
+                  <tbody id="positiveTableBody"></tbody>
+                </table>
+
+                <div id="positiveEmpty" class="state-view" hidden>
+                  <strong> 没有符合条件的 Positive Insight </strong>
+                </div>
+              </div>
+            </section>
+          </section>
+
+          <!-- ==================================================
+           Global Loading / Error
+      =================================================== -->
+
+          <div id="globalLoading" class="global-state">
+            <div class="spinner"></div>
+
+            <span> 正在加载 Product Insight... </span>
+          </div>
+
+          <div id="globalError" class="global-state error-state" hidden>
+            <strong> 数据加载失败 </strong>
+
+            <p id="globalErrorText"></p>
+
+            <button id="retryBtn" class="button secondary">重新加载</button>
+          </div>
+        </main>
+      </div>
+    </div>
+
+    <!-- ======================================================
+     Drawer
+======================================================= -->
+
+    <div id="drawerMask" class="drawer-mask"></div>
+
+    <aside id="drawer" class="drawer">
+      <div class="drawer-header">
+        <div class="drawer-heading">
+          <div id="drawerClusterId" class="drawer-cluster-id"></div>
+
+          <h2 id="drawerTitle"></h2>
+
+          <div id="drawerMeta" class="drawer-meta"></div>
+        </div>
+
+        <button id="drawerClose" class="drawer-close">×</button>
+      </div>
+
+      <div class="drawer-body">
+        <section class="drawer-section">
+          <div class="section-heading">
+            <div>
+              <span class="eyebrow"> Evidence </span>
+
+              <h3>代表用户反馈</h3>
+            </div>
+          </div>
+
+          <div id="representativeComment" class="evidence-card"></div>
+        </section>
+
+        <section class="drawer-section">
+          <div class="section-heading">
+            <div>
+              <span class="eyebrow"> AI Original </span>
+
+              <h3>AI 原始分析</h3>
+            </div>
+
+            <span class="source-badge"> Read only </span>
+          </div>
+
+          <div class="original-grid">
+            <div class="original-card">
+              <span class="field-label"> Insight Summary </span>
+
+              <div id="aiSummary" class="original-content"></div>
+            </div>
+
+            <div class="original-card">
+              <span class="field-label"> User Need </span>
+
+              <div id="aiNeed" class="original-content"></div>
+            </div>
+
+            <div class="original-card">
+              <span class="field-label"> Product Implication </span>
+
+              <div id="aiImplication" class="original-content"></div>
+            </div>
+
+            <div class="original-card">
+              <span class="field-label"> PM Follow-up </span>
+
+              <div id="aiFollowup" class="original-content"></div>
+            </div>
+          </div>
+        </section>
+
+        <section id="pmEditSection" class="drawer-section pm-edit-section">
+          <div class="section-heading">
+            <div>
+              <span class="eyebrow blue"> PM Review </span>
+
+              <h3>PM 修改版</h3>
+
+              <p class="section-description">
+                AI 正确时直接通过；需要修改时再生成 PM 版本。
+              </p>
+            </div>
+
+            <button id="copyAiBtn" class="button secondary">
+              复制 AI 原文
+            </button>
+          </div>
+
+          <div class="pm-empty-tip">
+            PM 字段默认保持空白，只有实际修改后才保存。
+          </div>
+
+          <div class="editor-group">
+            <label for="editSummary"> Insight Summary </label>
+
+            <textarea id="editSummary" class="editor"></textarea>
+          </div>
+
+          <div class="editor-group">
+            <label for="editNeed"> User Need </label>
+
+            <textarea id="editNeed" class="editor"></textarea>
+          </div>
+
+          <div class="editor-group">
+            <label for="editImplication"> Product Implication </label>
+
+            <textarea id="editImplication" class="editor"></textarea>
+          </div>
+
+          <div class="editor-group">
+            <label for="editFollowup"> PM Follow-up </label>
+
+            <textarea id="editFollowup" class="editor"></textarea>
+          </div>
+        </section>
+
+        <section id="reviewNoteSection" class="drawer-section">
+          <div class="section-heading">
+            <div>
+              <span class="eyebrow"> Review Note </span>
+
+              <h3>审核意见</h3>
+            </div>
+          </div>
+
+          <textarea
+            id="reviewComment"
+            class="editor review-comment"
+            placeholder="驳回时必须填写原因"
+          ></textarea>
+        </section>
+
+        <section
+          id="reviewMetaSection"
+          class="drawer-section review-meta-section"
+        >
+          <div class="review-meta-row">
+            <span> 上次审核人 </span>
+
+            <strong id="lastReviewedBy"> — </strong>
+          </div>
+
+          <div class="review-meta-row">
+            <span> 上次审核时间 </span>
+
+            <strong id="lastReviewedAt"> — </strong>
+          </div>
+        </section>
+      </div>
+
+      <div class="drawer-footer">
+        <div class="drawer-navigation">
+          <button id="prevBtn" class="button secondary">← 上一条</button>
+
+          <span id="drawerPosition" class="drawer-position"></span>
+
+          <button id="nextBtn" class="button secondary">下一条 →</button>
+        </div>
+
+        <div id="reviewActions" class="review-actions">
+          <button id="rejectBtn" class="button danger-outline">驳回</button>
+
+          <button id="modifyBtn" class="button modify">保存修改</button>
+
+          <button id="approveBtn" class="button approve">通过</button>
+        </div>
+      </div>
+    </aside>
+
+    <div id="toast" class="toast"></div>
+
+    <script src="./app.js"></script>
+  </body>
+</html>

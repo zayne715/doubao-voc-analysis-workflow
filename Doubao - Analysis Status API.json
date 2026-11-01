@@ -1,0 +1,143 @@
+{
+  "name": "Doubao - Analysis Status API",
+  "nodes": [
+    {
+      "parameters": {
+        "path": "doubao-analysis-status-v1",
+        "responseMode": "responseNode",
+        "options": {
+          "allowedOrigins": "http://localhost:5500,http://127.0.0.1:5500"
+        }
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        240,
+        576
+      ],
+      "id": "9b1c84b0-62f5-4d27-83b3-215836f65d36",
+      "name": "Webhook - Get Analysis Status",
+      "webhookId": "86d7e7c3-2007-4261-87bc-35d2af89a396"
+    },
+    {
+      "parameters": {
+        "operation": "get",
+        "dataTableId": {
+          "__rl": true,
+          "value": "pHlbB7Ee4WnmyUqx",
+          "mode": "list",
+          "cachedResultName": "analysis_run_status",
+          "cachedResultUrl": "/projects/iGCl7eUPLnSOVSKN/datatables/pHlbB7Ee4WnmyUqx"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "analysis_run_id",
+              "keyValue": "={{ $(\"Webhook - Get Analysis Status\").first().json.query.analysis_run_id }}"
+            }
+          ]
+        },
+        "limit": 1
+      },
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        464,
+        576
+      ],
+      "id": "cf80462e-3ce0-4247-ace2-ef8f171da587",
+      "name": "Data Table - Get Analysis Run Status",
+      "alwaysOutputData": true,
+      "settings": {
+        "alwaysOutputData": true
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "\nconst webhook = $(\n  \"Webhook - Get Analysis Status\"\n).first().json;\n\n// 1. 获取前端请求的批次编号\nconst analysisRunId = String(\n  webhook.query?.analysis_run_id ?? \"\"\n).trim();\n\n// 2. 校验请求参数\nif (\n  !analysisRunId ||\n  analysisRunId.length > 128 ||\n  !/^[A-Za-z0-9_-]+$/.test(analysisRunId)\n) {\n  return [\n    {\n      json: {\n        success: false,\n        found: false,\n        analysis_run_id: analysisRunId || null,\n        analysis_status: \"invalid_request\",\n        analysis_stage: null,\n        status_message: \"缺少或无效的 analysis_run_id\",\n        failed_node: null,\n        failure_reason: null,\n        total_review_count: null,\n        valid_review_count: null,\n        updated_at: null\n      }\n    }\n  ];\n}\n\n// 3. 读取 Data Table 查询结果\nconst rows = $input.all().map(item => item.json);\n\n// Always Output Data 开启后，\n// 未查到记录时可能会收到一个空对象 {}\nconst record = rows.find(row =>\n  String(row.analysis_run_id ?? \"\").trim() === analysisRunId\n);\n\n// 4. 找不到记录：返回 not_found\nif (!record) {\n  return [\n    {\n      json: {\n        success: true,\n        found: false,\n        analysis_run_id: analysisRunId,\n        analysis_status: \"not_found\",\n        analysis_stage: null,\n        status_message: \"未找到该批次的运行状态\",\n        failed_node: null,\n        failure_reason: null,\n        total_review_count: null,\n        valid_review_count: null,\n        updated_at: null\n      }\n    }\n  ];\n}\n\n// 5. 找到记录：返回当前批次状态\nreturn [\n  {\n    json: {\n      success: true,\n      found: true,\n\n      analysis_run_id: analysisRunId,\n\n      analysis_status:\n        String(record.analysis_status ?? \"unknown\"),\n\n      analysis_stage:\n        record.analysis_stage ?? null,\n\n      status_message:\n        record.status_message ?? \"\",\n\n      failed_node:\n        String(record.analysis_stage ?? \"\").startsWith(\"error:\")\n          ? String(record.analysis_stage).slice(6)\n          : null,\n\n      failure_reason:\n        String(record.analysis_status ?? \"\") === \"failed\"\n          ? String(record.status_message ?? \"\")\n          : null,\n\n      total_review_count:\n        record.total_review_count ?? null,\n\n      valid_review_count:\n        record.valid_review_count ?? null,\n\n      updated_at:\n        record.updated_at ?? null\n    }\n  }\n];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        688,
+        576
+      ],
+      "id": "afbb4f0f-ba55-43e1-ab15-25230ff2835c",
+      "name": "Code - Build Analysis Status Response"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}",
+        "options": {
+          "responseCode": 200,
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Content-Type",
+                "value": "application/json; charset=utf-8"
+              }
+            ]
+          }
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        912,
+        576
+      ],
+      "id": "a82d7163-bb90-43cf-a274-112fa7589564",
+      "name": "Respond - Analysis Status"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Webhook - Get Analysis Status": {
+      "main": [
+        [
+          {
+            "node": "Data Table - Get Analysis Run Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Data Table - Get Analysis Run Status": {
+      "main": [
+        [
+          {
+            "node": "Code - Build Analysis Status Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code - Build Analysis Status Response": {
+      "main": [
+        [
+          {
+            "node": "Respond - Analysis Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "9edbb2a3-6bcc-4d8b-a9ae-23b6c154b285",
+  "meta": {
+    "instanceId": "6d13b23637810c2caaac47c54e50325f90498d1eef65dbda39fdc123b64e9717"
+  },
+  "nodeGroups": [],
+  "id": "on96Coc0EASqUGS5",
+  "tags": []
+}

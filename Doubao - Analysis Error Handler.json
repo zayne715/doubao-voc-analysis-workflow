@@ -1,0 +1,325 @@
+{
+  "name": "Doubao - Analysis Error Handler",
+  "nodes": [
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        -752,
+        656
+      ],
+      "id": "34d45ea3-40c1-4a5a-9c6f-986c23191c14",
+      "name": "Error Trigger"
+    },
+    {
+      "parameters": {
+        "jsCode": "const payload = $input.first()?.json ?? {};\n\n// 1. 失败的原工作流执行编号\nconst executionId = String(\n  payload.execution?.id ?? \"\"\n).trim();\n\n// 2. 原工作流信息\nconst workflowId = String(\n  payload.workflow?.id ?? \"\"\n).trim();\n\nconst workflowName = String(\n  payload.workflow?.name ?? \"\"\n).trim();\n\n// 3. 发生错误的节点\nconst failedNode = String(\n  payload.execution?.lastNodeExecuted ??\n  payload.trigger?.error?.node?.name ??\n  \"unknown\"\n).trim() || \"unknown\";\n\n// 4. 原始错误仅用于分类，不直接写入面向 PM 的状态提示\nconst failureMessage = String(\n  payload.execution?.error?.message ??\n  payload.trigger?.error?.message ??\n  \"Unknown workflow error\"\n).slice(0, 1000);\n\nconst normalizedError = failureMessage.toLowerCase();\nlet failureReason;\n\nif (\n  normalizedError.includes(\"no_positive_insights\") ||\n  normalizedError.includes(\"no positive insights\")\n) {\n  failureReason = \"本批次没有可用于汇总的正向产品洞察，整体正向报告未生成。请检查正向洞察分析与入库结果。\";\n} else if (\n  normalizedError.includes(\"quality_filter_empty_output\") ||\n  normalizedError.includes(\"quality_filter_invalid_result\")\n) {\n  failureReason = \"评论质量筛选未返回有效的分析结果，任务已停止。请检查质量筛选节点的输出。\";\n} else if (\n  normalizedError.includes(\"invalid_response\") ||\n  normalizedError.includes(\"invalid response\") ||\n  normalizedError.includes(\"validation\") ||\n  normalizedError.includes(\"schema\") ||\n  normalizedError.includes(\"json parse\") ||\n  normalizedError.includes(\"校验\") ||\n  normalizedError.includes(\"格式\")\n) {\n  failureReason = \"模型返回内容未通过格式或内容校验，分析未完成。请检查失败节点的执行记录。\";\n} else if (\n  /\\b429\\b|rate limit|quota|insufficient|timeout|timed out|econn|fetch failed|\\b502\\b|\\b503\\b|temporarily unavailable/.test(normalizedError)\n) {\n  failureReason = \"模型服务或网络请求未能正常完成，分析未完成。请检查服务状态与接口调用记录。\";\n} else {\n  failureReason = `分析在“${failedNode}”阶段中断，任务未完成。请查看 n8n 对应执行记录；如问题持续，请联系维护人员。`;\n}\n\n// 5. 统一异常数据格式。原始错误保留在 n8n 执行记录中，不暴露给 PM。\nreturn [\n  {\n    json: {\n      execution_id: executionId,\n      has_execution_id: executionId.length > 0,\n      failed_workflow_id: workflowId,\n      failed_workflow_name: workflowName,\n      failed_node: failedNode,\n      failure_message: failureMessage,\n      failure_reason: failureReason,\n      failed_at: new Date().toISOString(),\n      status_message: failureReason\n    }\n  }\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -528,
+        656
+      ],
+      "id": "4c2ad0a3-0e61-4656-86f7-3e145f89fe89",
+      "name": "Code - Normalize Error Context"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "9cd4160c-d80f-486d-b406-4ae8ce1e5d1d",
+              "leftValue": "={{ $json.has_execution_id }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        -304,
+        656
+      ],
+      "id": "7bb1f7cb-4bff-498e-8f01-cf629765dc04",
+      "name": "IF - Has Execution ID"
+    },
+    {
+      "parameters": {
+        "operation": "get",
+        "dataTableId": {
+          "__rl": true,
+          "value": "pHlbB7Ee4WnmyUqx",
+          "mode": "list",
+          "cachedResultName": "analysis_run_status",
+          "cachedResultUrl": "/projects/iGCl7eUPLnSOVSKN/datatables/pHlbB7Ee4WnmyUqx"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "execution_id",
+              "keyValue": "={{ $json.execution_id }}"
+            }
+          ]
+        },
+        "limit": 1
+      },
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        -64,
+        512
+      ],
+      "id": "308f12e4-88b4-454d-a285-d7d0aa6ee020",
+      "name": "Data Table - Get Failed Run Status"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "6b549aed-06dd-4d4b-b7ab-7a9d61601adf",
+              "leftValue": "={{ $json.analysis_status }}",
+              "rightValue": "running",
+              "operator": {
+                "type": "string",
+                "operation": "equals",
+                "name": "filter.operator.equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        160,
+        512
+      ],
+      "id": "8453c083-a363-493f-ad71-31aa5b530dad",
+      "name": "IF - Main Analysis Still Running"
+    },
+    {
+      "parameters": {
+        "operation": "upsert",
+        "dataTableId": {
+          "__rl": true,
+          "value": "pHlbB7Ee4WnmyUqx",
+          "mode": "list",
+          "cachedResultName": "analysis_run_status",
+          "cachedResultUrl": "/projects/iGCl7eUPLnSOVSKN/datatables/pHlbB7Ee4WnmyUqx"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "analysis_run_id",
+              "keyValue": "={{ $json.analysis_run_id }}"
+            }
+          ]
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "analysis_run_id": "={{ $json.analysis_run_id }}",
+            "execution_id": "={{ $json.execution_id }}",
+            "analysis_status": "failed",
+            "analysis_stage": "={{ \"error:\" + $(\"Code - Normalize Error Context\").first().json.failed_node }}",
+            "updated_at": "={{ $now.toISO() }}",
+            "total_review_count": "={{ Number($json.total_review_count ?? 0) }}",
+            "valid_review_count": "={{ Number($json.valid_review_count ?? 0) }}",
+            "status_message": "={{ $(\"Code - Normalize Error Context\").first().json.status_message }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "analysis_run_id",
+              "displayName": "analysis_run_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "analysis_status",
+              "displayName": "analysis_status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "analysis_stage",
+              "displayName": "analysis_stage",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "status_message",
+              "displayName": "status_message",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "updated_at",
+              "displayName": "updated_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "total_review_count",
+              "displayName": "total_review_count",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "valid_review_count",
+              "displayName": "valid_review_count",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "execution_id",
+              "displayName": "execution_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        384,
+        416
+      ],
+      "id": "5efcd432-03f7-4ea1-bf81-08000a4916ec",
+      "name": "Data Table - Upsert Failed Status"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Error Trigger": {
+      "main": [
+        [
+          {
+            "node": "Code - Normalize Error Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code - Normalize Error Context": {
+      "main": [
+        [
+          {
+            "node": "IF - Has Execution ID",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF - Has Execution ID": {
+      "main": [
+        [
+          {
+            "node": "Data Table - Get Failed Run Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Data Table - Get Failed Run Status": {
+      "main": [
+        [
+          {
+            "node": "IF - Main Analysis Still Running",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF - Main Analysis Still Running": {
+      "main": [
+        [
+          {
+            "node": "Data Table - Upsert Failed Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "bd9c2337-ad77-432a-ad21-7eefe68014bd",
+  "meta": {
+    "instanceId": "6d13b23637810c2caaac47c54e50325f90498d1eef65dbda39fdc123b64e9717"
+  },
+  "nodeGroups": [],
+  "id": "cOhdAIefwEbVU5w2",
+  "tags": []
+}

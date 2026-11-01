@@ -1,0 +1,26 @@
+# Secrets / local environment
+**/.env
+!**/.env.example
+
+# Python environments and generated files
+.venv/
+**/.venv/
+__pycache__/
+**/__pycache__/
+*.py[cod]
+.pytest_cache/
+**/.pytest_cache/
+
+# Local data and runtime databases
+data/
+**/data/
+*.db
+*.sqlite3
+*.sqlite3-*
+*.log
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
