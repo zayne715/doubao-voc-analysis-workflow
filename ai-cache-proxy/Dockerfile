@@ -3,6 +3,6 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY app.py .
-RUN mkdir -p /data
-# Single worker is intentional: in-process deduplication avoids parallel duplicate API calls.
+RUN mkdir -p /data && python -m py_compile /app/app.py
+# Single worker is intentional: in-process deduplication avoids duplicate API calls.
 CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]

@@ -1,4 +1,4 @@
-# 豆包 AI Cache Proxy v3
+# 豆包 AI Cache Proxy
 
 这版代理支持当前主工作流的 DeepSeek 请求。原版单条阶段与提速测试版批量阶段并存，共 8 个缓存阶段；`positive-overall` 直通且不缓存。
 
@@ -23,6 +23,18 @@
 - 完整 DeepSeek 请求 body
 
 所以 Prompt、模型、messages、参数等发生变化时，会产生新的缓存 Key。
+
+## 可选单评论缓存
+
+`quality-batch` 和 `issue-batch` 支持按 `source_comment_id` 复用单条评论结果。该功能默认关闭：
+
+```env
+REVIEW_CACHE_ENABLED=0
+```
+
+完成部署验证后可改为 `1`。启用后，代理会同时校验评论完整内容、模型参数、提示词、Namespace 和 Stage Version；任一内容变化都会重新调用模型。批次重新排序或只增加少量评论时，代理只请求未命中的评论，再按当前批次顺序组装完整响应。
+
+单评论缓存与原有整批缓存共用 `/data/cache.sqlite3`，不需要新数据卷。恢复为 `0` 即可回退到原行为，已有缓存数据不会影响关闭后的请求路径。
 
 其他阶段只缓存：
 
@@ -60,7 +72,7 @@
 docker exec n8n node -e "fetch('http://ai-cache-proxy:8000/health').then(r=>r.text()).then(console.log)"
 ```
 
-正常会返回 `status=ok`、9 个支持阶段，以及 `cache_bypass_stages: ["positive-overall"]`。
+正常会返回 `status=ok`、9 个支持阶段、`cache_bypass_stages: ["positive-overall"]`、`review_cache_enabled` 和 `review_cache_stages`。
 
 ## 注意
 

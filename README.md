@@ -27,6 +27,8 @@
 
 `positive-overall`（正向整体报告）绕过缓存，由 n8n 的解析与校验节点处理。缓存数据库位于 Docker 持久化数据卷，不随项目源码分发。批量处理分别使用 `quality-batch`、`issue-batch` 独立缓存阶段。
 
+`quality-batch` 和 `issue-batch` 还支持可选的单评论缓存：设置 `REVIEW_CACHE_ENABLED=1` 后，调整批次顺序或混入少量新评论时，只会把未命中的评论发送给模型。该功能默认关闭，可通过恢复为 `0` 立即回退，不会改变原有整批缓存行为。
+
 ## 文档入口
 
 - [项目说明](./docs/项目说明.md)

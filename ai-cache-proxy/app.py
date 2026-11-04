@@ -1,4 +1,4 @@
-"""Doubao AI cache proxy.
+"""Doubao AI cache proxy with response validation and quality diagnostics.
 
 Cached stages:
 - quality (legacy single-item)
@@ -13,18 +13,24 @@ Cached stages:
 Pass-through stage (no cache reads/writes and no proxy-level report validation):
 - positive-overall
 
-The cache key includes namespace + stage + complete request body.
+The original whole-request cache remains unchanged. Optionally, quality-batch and
+issue-batch also cache independently by stable source_comment_id, complete review
+metadata, exact surrounding prompt, model parameters, namespace and stage version.
+Set REVIEW_CACHE_ENABLED=1 to opt in, or 0 to roll back without losing data.
 Optional per-stage versioning can invalidate one cached stage independently.
 """
 
 from __future__ import annotations
 
 import asyncio
-from contextlib import asynccontextmanager, closing
+from contextlib import AsyncExitStack, asynccontextmanager, closing
+from copy import deepcopy
+from dataclasses import dataclass
 import hashlib
 import json
 import logging
 import os
+import re
 from pathlib import Path
 import sqlite3
 import time
@@ -71,6 +77,17 @@ STAGE_VALIDATORS = (
 # Positive Overall Report does not use cache reads/writes or proxy-level
 # response validation. Its output is validated by the n8n workflow instead.
 NO_CACHE_STAGES = frozenset({"positive-overall"})
+REVIEW_CACHE_STAGES = frozenset({"quality-batch", "issue-batch"})
+REVIEW_TAG_PATTERN = re.compile(r"<reviews>\s*(.*?)\s*</reviews>", re.DOTALL)
+
+
+def is_review_cache_enabled() -> bool:
+    # Default OFF: preserves the already-working production behavior until
+    # a deliberate deployment with REVIEW_CACHE_ENABLED=1.
+    return os.getenv("REVIEW_CACHE_ENABLED", "0").strip().lower() in {
+        "1", "true", "yes", "on"
+    }
+
 
 
 # Optional versions for each cache stage, supplied when starting the container.
@@ -591,6 +608,210 @@ VALIDATORS: dict[str, Callable[[object, dict], bool]] = {
 }
 
 
+@dataclass(frozen=True)
+class ReviewCacheCandidate:
+    batch_item_id: str
+    review: dict
+    key: str | None
+    review_fingerprint: str | None
+
+
+@dataclass(frozen=True)
+class ReviewCachePlan:
+    candidates: list[ReviewCacheCandidate]
+    user_message_index: int
+    prompt_fingerprint: str
+
+
+def sha256_json(value: object) -> str:
+    return hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()
+
+
+def prepare_review_cache_plan(
+    body: dict, namespace: str, stage: str, stage_version: str
+) -> ReviewCachePlan | None:
+    """Only optimize a recognizable, unambiguous <reviews> batch request.
+
+    The fingerprint includes all original instructions and model parameters,
+    but replaces the *whole* reviews array with a fixed placeholder. The per-
+    review fingerprint contains all original fields except the transport-only
+    batch_item_id. This ensures changing a review or prompt is a cache MISS.
+    """
+    if stage not in REVIEW_CACHE_STAGES:
+        return None
+    expected_ids = extract_batch_ids(body)
+    if expected_ids is None:
+        return None
+    messages = body.get("messages", [])
+    user_indices = [i for i, m in enumerate(messages)
+                    if m.get("role") == "user"]
+    if not user_indices:
+        return None
+    index = user_indices[-1]
+    original_text = messages[index]["content"]
+    matches = list(REVIEW_TAG_PATTERN.finditer(original_text))
+    if len(matches) != 1:
+        return None
+    reviews = extract_tagged_json(original_text, "reviews")
+    if not isinstance(reviews, list) or len(reviews) != len(expected_ids):
+        return None
+
+    template = deepcopy(body)
+    m = matches[0]
+    template["messages"][index]["content"] = (
+        original_text[:m.start()] + "<reviews>__REVIEW_CACHE_V1__</reviews>"
+        + original_text[m.end():]
+    )
+    prompt_fingerprint = sha256_json(template)
+    candidates = []
+    for review, item_id in zip(reviews, expected_ids):
+        # Only IDs actually supplied by the review source qualify. This
+        # deliberately excludes n8n-generated row:1/valid-row:1 IDs.
+        source_id = review.get("source_comment_id")
+        normalized_id = str(source_id).strip() if source_id is not None else ""
+        cache_key = None
+        review_fp = None
+        if normalized_id and review.get("batch_item_id") == f"comment:{normalized_id}":
+            canonical_review = {
+                k: v for k, v in review.items() if k != "batch_item_id"
+            }
+            try:
+                review_fp = sha256_json(canonical_review)
+                cache_key = sha256_json({
+                    "cache_type": "review-v1", "namespace": namespace,
+                    "stage": stage, "stage_version": stage_version,
+                    "prompt_fingerprint": prompt_fingerprint,
+                    "review_fingerprint": review_fp,
+                })
+            except (TypeError, ValueError):
+                pass
+        candidates.append(ReviewCacheCandidate(item_id, review, cache_key, review_fp))
+    return ReviewCachePlan(candidates, index, prompt_fingerprint)
+
+
+def response_rows_from_raw(raw: str, stage: str, body: dict) -> dict[str, dict] | None:
+    try:
+        decoded = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    return response_rows(decoded, stage, body)
+
+
+def response_rows(payload: object, stage: str, body: dict) -> dict[str, dict] | None:
+    if stage not in REVIEW_CACHE_STAGES or not VALIDATORS[stage](payload, body):
+        return None
+    parsed = parse_response_json(payload)
+    return {row["batch_item_id"]: row for row in parsed["results"]}
+
+
+def validate_cached_review_row(stage: str, row: object) -> bool:
+    if not isinstance(row, dict) or not isinstance(row.get("batch_item_id"), str):
+        return False
+    if stage == "quality-batch":
+        return (
+            set(row) == {"batch_item_id", "is_valid", "invalid_reason"}
+            and validate_quality_row({
+                "is_valid": row.get("is_valid"),
+                "invalid_reason": row.get("invalid_reason"),
+            })
+        )
+    if stage == "issue-batch":
+        return (
+            set(row) == {"batch_item_id", "issues"}
+            and isinstance(row.get("issues"), list)
+            and bool(row["issues"])
+            and all(validate_issue_item(issue) for issue in row["issues"])
+        )
+    return False
+
+
+def find_cached_review_rows(
+    path: Path, plan: ReviewCachePlan, stage: str
+) -> dict[str, dict]:
+    hits: dict[str, dict] = {}
+    with closing(sqlite3.connect(path, timeout=30)) as conn:
+        for candidate in plan.candidates:
+            if candidate.key is None:
+                continue
+            record = conn.execute(
+                "SELECT result_json FROM ai_review_cache WHERE cache_key=?",
+                (candidate.key,),
+            ).fetchone()
+            if not record:
+                continue
+            try:
+                row = json.loads(record[0])
+            except (ValueError, TypeError):
+                continue
+            if not validate_cached_review_row(stage, row):
+                continue
+            row = dict(row)
+            # ID belongs to the CURRENT request, not the batch where it was
+            # first cached. Do not leak the previous batch_item_id into n8n.
+            row["batch_item_id"] = candidate.batch_item_id
+            hits[candidate.batch_item_id] = row
+    return hits
+
+
+def body_with_missing_reviews(body: dict, plan: ReviewCachePlan, missing: list) -> dict:
+    result = deepcopy(body)
+    index = plan.user_message_index
+    text = result["messages"][index]["content"]
+    match = REVIEW_TAG_PATTERN.search(text)
+    assert match is not None
+    # Escape '<' as the existing n8n JSON Body does.
+    serialized = canonical_json([c.review for c in missing]).replace("<", "\\u003c")
+    result["messages"][index]["content"] = (
+        text[:match.start(1)] + serialized + text[match.end(1):]
+    )
+    return result
+
+
+def combined_response(upstream_payload: dict | None, model: str, rows: list[dict]) -> str:
+    """Match the OpenAI chat response shape expected by both n8n parsers."""
+    if upstream_payload is None:
+        result = {
+            "id": "review-cache-reassembled", "object": "chat.completion",
+            "model": model,
+            "choices": [{"index": 0, "finish_reason": "stop", "message": {
+                "role": "assistant", "content": "",
+            }}],
+            "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+        }
+    else:
+        result = deepcopy(upstream_payload)
+    result["choices"][0]["message"]["content"] = canonical_json({"results": rows})
+    return canonical_json(result)
+
+
+def save_batch_and_reviews(
+    path: Path, batch_key: str, stage: str, model: str,
+    raw_response: str, plan: ReviewCachePlan | None,
+    validated_rows: dict[str, dict] | None,
+) -> None:
+    """Atomically save the full-request and independent-review caches."""
+    with closing(sqlite3.connect(path, timeout=30)) as conn, conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO ai_cache "
+            "(cache_key, stage, model, response_json) VALUES (?, ?, ?, ?)",
+            (batch_key, stage, model, raw_response),
+        )
+        if plan is not None and validated_rows is not None:
+            for candidate in plan.candidates:
+                if not candidate.key or candidate.batch_item_id not in validated_rows:
+                    continue
+                row = validated_rows[candidate.batch_item_id]
+                if not validate_cached_review_row(stage, row):
+                    continue
+                conn.execute(
+                    "INSERT OR IGNORE INTO ai_review_cache "
+                    "(cache_key, stage, model, prompt_fingerprint, "
+                    "review_fingerprint, result_json) VALUES (?, ?, ?, ?, ?, ?)",
+                    (candidate.key, stage, model, plan.prompt_fingerprint,
+                     candidate.review_fingerprint, canonical_json(row)),
+                )
+
+
 def initialize_db(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with closing(sqlite3.connect(path, timeout=30)) as conn, conn:
@@ -621,6 +842,23 @@ def initialize_db(path: Path) -> None:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_ai_cache_stage ON ai_cache(stage)"
         )
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS ai_review_cache (
+                cache_key TEXT PRIMARY KEY,
+                stage TEXT NOT NULL,
+                model TEXT NOT NULL,
+                prompt_fingerprint TEXT NOT NULL,
+                review_fingerprint TEXT NOT NULL,
+                result_json TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (
+                    strftime('%Y-%m-%dT%H:%M:%fZ','now')
+                )
+            )
+        """)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_ai_review_cache_stage "
+            "ON ai_review_cache(stage)"
+        )
 
 
 def read_cache(path: Path, key: str) -> str | None:
@@ -630,22 +868,6 @@ def read_cache(path: Path, key: str) -> str | None:
             (key,),
         ).fetchone()
     return row[0] if row else None
-
-
-def save_cache(
-    path: Path,
-    key: str,
-    stage: str,
-    model: str,
-    response_text: str,
-) -> None:
-    with closing(sqlite3.connect(path, timeout=30)) as conn, conn:
-        conn.execute(
-            "INSERT OR IGNORE INTO ai_cache "
-            "(cache_key, stage, model, response_json) "
-            "VALUES (?, ?, ?, ?)",
-            (key, stage, model, response_text),
-        )
 
 
 def create_app(
@@ -664,6 +886,7 @@ def create_app(
     )
     namespace = os.getenv("CACHE_NAMESPACE", "issue-v2")
     stage_cache_versions = load_stage_cache_versions()
+    review_cache_enabled = is_review_cache_enabled()
     upstream_url = os.getenv(
         "DEEPSEEK_URL",
         "https://api.deepseek.com/chat/completions",
@@ -703,6 +926,8 @@ def create_app(
             "stages": list(STAGE_VALIDATORS),
             "cache_bypass_stages": sorted(NO_CACHE_STAGES),
             "cache_versions": stage_cache_versions,
+            "review_cache_enabled": review_cache_enabled,
+            "review_cache_stages": sorted(REVIEW_CACHE_STAGES),
         }
 
     @app.post("/chat/completions")
@@ -756,6 +981,10 @@ def create_app(
         label = stage.upper()
 
         logger.info("%s %s received", label, tag)
+        plan = (
+            prepare_review_cache_plan(body, namespace, stage, stage_cache_versions[stage])
+            if review_cache_enabled and stage in REVIEW_CACHE_STAGES else None
+        )
 
         def answer(raw: str, hit: bool) -> Response:
             return Response(
@@ -768,50 +997,14 @@ def create_app(
                 },
             )
 
-        try:
-            previous = (
-                None
-                if stage in NO_CACHE_STAGES
-                else read_cache(database_path, key)
-            )
-            if previous is not None:
-                logger.info(
-                    "%s %s cache_hit elapsed=%.1fs",
-                    label,
-                    tag,
-                    time.monotonic() - started,
-                )
-                return answer(previous, hit=True)
-        except sqlite3.Error as exc:
-            logger.error("%s %s cache_read_failed", label, tag)
-            raise HTTPException(503, "Cache database read failed") from exc
-
-        async with one_request_per_key(key, locks, guard):
-            try:
-                previous = (
-                    None
-                    if stage in NO_CACHE_STAGES
-                    else read_cache(database_path, key)
-                )
-                if previous is not None:
-                    logger.info(
-                        "%s %s cache_hit_after_wait elapsed=%.1fs",
-                        label,
-                        tag,
-                        time.monotonic() - started,
-                    )
-                    return answer(previous, hit=True)
-            except sqlite3.Error as exc:
-                logger.error(
-                    "%s %s cache_read_failed_after_wait",
-                    label,
-                    tag,
-                )
-                raise HTTPException(
-                    503,
-                    "Cache database read failed",
-                ) from exc
-
+        # Closure exists to keep the original single upstream-response path
+        # identical when the per-review optimization is disabled.
+        async def fetch_and_cache(
+            upstream_body: dict,
+            plan: ReviewCachePlan | None,
+            cached_rows: dict[str, dict],
+            missing_candidates: list[ReviewCacheCandidate],
+        ) -> Response:
             if not secret:
                 raise HTTPException(
                     503,
@@ -828,7 +1021,7 @@ def create_app(
             try:
                 upstream = await app.state.client.post(
                     upstream_url,
-                    json=body,
+                    json=upstream_body,
                     headers={
                         "Authorization": f"Bearer {secret}",
                         "Content-Type": "application/json",
@@ -905,7 +1098,69 @@ def create_app(
                     "DeepSeek did not return JSON; not cached",
                 ) from exc
 
-            if not VALIDATORS[stage](parsed_response, body):
+            if stage == "quality-batch":
+                choices = parsed_response.get("choices", []) if isinstance(parsed_response, dict) else []
+                choice = choices[0] if isinstance(choices, list) and choices and isinstance(choices[0], dict) else {}
+                message = choice.get("message", {})
+                content = message.get("content") if isinstance(message, dict) else None
+
+                clean_content = clean_json_content(content)
+                parsed_content = None
+                json_error = None
+
+                if clean_content:
+                    try:
+                        parsed_content = json.loads(clean_content)
+                    except (TypeError, ValueError) as exc:
+                        json_error = f"{type(exc).__name__}: {exc}"
+
+                # For a partial cache HIT, DeepSeek receives only the MISS subset.
+                # The running version used `body` here; full requests are unchanged,
+                # but partial requests must be diagnosed against `upstream_body`.
+                expected_ids = extract_batch_ids(upstream_body)
+                results = parsed_content.get("results") if isinstance(parsed_content, dict) else None
+
+                row_key_shapes = sorted({
+                    ",".join(sorted(row.keys()))
+                    for row in results
+                    if isinstance(row, dict)
+                }) if isinstance(results, list) else []
+
+                returned_ids = [
+                    row.get("batch_item_id")
+                    for row in results
+                    if isinstance(row, dict)
+                ] if isinstance(results, list) else []
+
+                ids_match = (
+                    expected_ids is not None
+                    and len(returned_ids) == len(expected_ids)
+                    and all(isinstance(x, str) for x in returned_ids)
+                    and set(returned_ids) == set(expected_ids)
+                )
+
+                invalid_reasons = sorted({
+                    str(row.get("invalid_reason"))
+                    for row in results
+                    if isinstance(row, dict)
+                }) if isinstance(results, list) else []
+
+                logger.warning(
+                    "QUALITY-BATCH-DIAG finish_reason=%r content_type=%s content_len=%s json_error=%r top_keys=%s expected_count=%s result_count=%s row_key_shapes=%s ids_match=%s invalid_reasons=%s usage=%s",
+                    choice.get("finish_reason"),
+                    type(content).__name__,
+                    len(content) if isinstance(content, str) else None,
+                    json_error,
+                    sorted(parsed_content.keys()) if isinstance(parsed_content, dict) else type(parsed_content).__name__,
+                    len(expected_ids) if expected_ids is not None else None,
+                    len(results) if isinstance(results, list) else None,
+                    row_key_shapes,
+                    ids_match,
+                    invalid_reasons,
+                    parsed_response.get("usage") if isinstance(parsed_response, dict) else None,
+                )
+
+            if not VALIDATORS[stage](parsed_response, upstream_body):
                 logger.error(
                     "%s %s invalid_response elapsed=%.1fs",
                     label,
@@ -917,13 +1172,24 @@ def create_app(
                     f"DeepSeek {stage} JSON is incomplete or invalid; not cached",
                 )
 
+            raw_response = upstream.text
+            rows = None
+            if plan is not None:
+                upstream_rows = response_rows(parsed_response, stage, upstream_body)
+                if upstream_rows is None:
+                    raise HTTPException(502, "Invalid sub-batch response")
+                if cached_rows:
+                    merged_rows = {**cached_rows, **upstream_rows}
+                    ordered = [merged_rows[c.batch_item_id] for c in plan.candidates]
+                    raw_response = combined_response(parsed_response, model, ordered)
+                else:
+                    merged_rows = upstream_rows
+                if not VALIDATORS[stage](json.loads(raw_response), body):
+                    raise HTTPException(502, "Merged response failed validation; not cached")
+                rows = merged_rows
             try:
-                save_cache(
-                    database_path,
-                    key,
-                    stage,
-                    model,
-                    upstream.text,
+                save_batch_and_reviews(
+                    database_path, key, stage, model, raw_response, plan, rows
                 )
             except sqlite3.Error as exc:
                 logger.error(
@@ -943,7 +1209,128 @@ def create_app(
                 time.monotonic() - started,
             )
 
-            return answer(upstream.text, hit=False)
+            if cached_rows:
+                logger.info(
+                    "%s %s partial_cache_hit reused=%d analyzed=%d elapsed=%.1fs",
+                    label, tag, len(cached_rows), len(missing_candidates),
+                    time.monotonic() - started,
+                )
+                return Response(
+                    content=raw_response, media_type="application/json",
+                    headers={
+                        "X-AI-Cache": "PARTIAL",
+                        "X-AI-Cache-Stage": stage,
+                        "X-AI-Cache-Version": stage_cache_versions[stage],
+                    },
+                )
+            return answer(raw_response, hit=False)
+
+
+        try:
+            previous = (
+                None
+                if stage in NO_CACHE_STAGES
+                else read_cache(database_path, key)
+            )
+            if previous is not None:
+                if plan is not None:
+                    validated = response_rows_from_raw(previous, stage, body)
+                    if validated is not None:
+                        save_batch_and_reviews(
+                            database_path, key, stage, model, previous, plan, validated
+                        )
+                logger.info(
+                    "%s %s cache_hit elapsed=%.1fs",
+                    label,
+                    tag,
+                    time.monotonic() - started,
+                )
+                return answer(previous, hit=True)
+        except sqlite3.Error as exc:
+            logger.error("%s %s cache_read_failed", label, tag)
+            raise HTTPException(503, "Cache database read failed") from exc
+
+        async with one_request_per_key(key, locks, guard):
+            try:
+                previous = (
+                    None
+                    if stage in NO_CACHE_STAGES
+                    else read_cache(database_path, key)
+                )
+                if previous is not None:
+                    if plan is not None:
+                        validated = response_rows_from_raw(previous, stage, body)
+                        if validated is not None:
+                            save_batch_and_reviews(
+                                database_path, key, stage, model, previous, plan, validated
+                            )
+                    logger.info(
+                        "%s %s cache_hit_after_wait elapsed=%.1fs",
+                        label,
+                        tag,
+                        time.monotonic() - started,
+                    )
+                    return answer(previous, hit=True)
+            except sqlite3.Error as exc:
+                logger.error(
+                    "%s %s cache_read_failed_after_wait",
+                    label,
+                    tag,
+                )
+                raise HTTPException(
+                    503,
+                    "Cache database read failed",
+                ) from exc
+
+            cached_rows: dict[str, dict] = {}
+            missing_candidates: list[ReviewCacheCandidate] = []
+            upstream_body = body
+            # All row locks are held until merged results are committed. This
+            # avoids duplicate DeepSeek calls for overlapping concurrent batches.
+            async with AsyncExitStack() as row_locks:
+                if plan is not None:
+                    for row_key in sorted({c.key for c in plan.candidates if c.key}):
+                        await row_locks.enter_async_context(
+                            one_request_per_key("review:" + row_key, locks, guard)
+                        )
+                    try:
+                        cached_rows = find_cached_review_rows(database_path, plan, stage)
+                    except sqlite3.Error as exc:
+                        raise HTTPException(503, "Review cache read failed") from exc
+                    missing_candidates = [
+                        c for c in plan.candidates if c.batch_item_id not in cached_rows
+                    ]
+                    logger.info(
+                        "%s %s review_cache hits=%d misses=%d elapsed=%.1fs",
+                        label, tag, len(cached_rows), len(missing_candidates),
+                        time.monotonic() - started,
+                    )
+                    if not missing_candidates:
+                        ordered = [cached_rows[c.batch_item_id] for c in plan.candidates]
+                        assembled = combined_response(None, model, ordered)
+                        if not VALIDATORS[stage](json.loads(assembled), body):
+                            raise HTTPException(502, "Reassembled cached batch failed validation")
+                        try:
+                            save_batch_and_reviews(
+                                database_path, key, stage, model, assembled,
+                                plan, cached_rows,
+                            )
+                        except sqlite3.Error as exc:
+                            raise HTTPException(503, "Review cache write failed") from exc
+                        logger.info(
+                            "%s %s cache_hit_reviews elapsed=%.1fs",
+                            label, tag, time.monotonic() - started,
+                        )
+                        return answer(assembled, hit=True)
+                    if cached_rows:
+                        upstream_body = body_with_missing_reviews(
+                            body, plan, missing_candidates
+                        )
+
+                return await fetch_and_cache(
+                    upstream_body, plan, cached_rows, missing_candidates
+                )
+
 
     return app
 
